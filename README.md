@@ -30,13 +30,22 @@ Example summary in the response:
 
 ## Architecture
 
+Target design, and what runs locally today:
+
 ```
-Client (Postman or simulator) -> Python app (FastAPI) -> JSON response
-                                  |- API key check (401)
-                                  |- Rate limit (429)
-                                  |- Masking of ISA/GS sender and receiver IDs
-                                  |- 997 parser + error-code tables (source of truth)
-                                  |- Optional LLM step (Gemini API)
+Real-world design:   Sterling Integrator -> Apigee X -> Python app -> LLM (optional)
+Runs on a laptop:    Postman / simulator -> gateway code -> Python app -> Gemini API (optional)
+```
+
+Inside the Python app:
+
+```
+Client -> Python app (FastAPI)
+           |- API key check (401)
+           |- Rate limit (429)
+           |- Masking of ISA/GS sender and receiver IDs
+           |- 997 parser + error-code tables (source of truth)
+           |- Optional LLM step (Gemini API)
 ```
 
 How the AI step is kept safe:
@@ -46,7 +55,25 @@ How the AI step is kept safe:
 - The prompt tells the model to use only the facts it is given.
 - If the AI call fails (for example HTTP 503), the response still contains the table-based summary, plus an `ai_error` note.
 
-The gateway features (key check, rate limit, masking) are written in code to practice the ideas behind API gateway policies such as Apigee's VerifyAPIKey, Quota/SpikeArrest and data masking. A real Apigee proxy is a planned next phase.
+## Why a gateway?
+
+The explainer works without a gateway. A gateway such as Apigee X is added for governance, not for functionality:
+
+- **Cost control.** Each LLM call can cost money. Quota and spike arrest limit the calls before they reach the backend or the LLM.
+- **Data protection.** EDI carries partner IDs. Masking at the gateway means no backend or AI service sees the raw values, and the rule is enforced in one place.
+- **Many consumers, one rule set.** Sterling is only the first caller. Each consumer can get its own key and quota, and one key can be revoked without redeploying anything.
+- **Secrets stay out of callers.** A Sterling process should not hold an LLM key. Callers hold a gateway key, and the provider key lives in the gateway.
+- **Visibility.** Analytics show who calls the API, how often, and what fails.
+
+In this repo, those controls are written in code to practice the ideas behind the matching Apigee policies:
+
+| Code in this repo | Apigee policy it mirrors |
+|---|---|
+| API key check (401) | VerifyAPIKey |
+| Per-key rate limit (429) | Quota, SpikeArrest |
+| Masking of ISA/GS IDs | Masking with JavaScript or RegularExpressionProtection |
+
+Apigee itself has not been built yet. It is a planned phase.
 
 ## Run it (Windows)
 
@@ -65,6 +92,7 @@ In a second window, run the Sterling-style simulator:
 
 ```
 python sterling_simulator.py
+python sterling_simulator.py --ai samples\997_rejected.edi
 ```
 
 ## Files
@@ -73,7 +101,7 @@ python sterling_simulator.py
 - `edi_parser.py`: 997 parser and error-code tables
 - `masking.py`: masks sender and receiver IDs
 - `ai_explainer.py`: optional LLM step with fallback
-- `sterling_simulator.py`: script that mimics a Sterling Integrator HTTP call
+- `sterling_simulator.py`: script that mimics a Sterling Integrator HTTP call (use `--ai` for the AI step)
 - `samples/`: demo 997 files
 
 ## Limitations
@@ -86,6 +114,6 @@ python sterling_simulator.py
 
 ## Possible next steps
 
-- Put an Apigee proxy in front of the app
+- Put an Apigee proxy in front of the app and move the gateway controls into policies
 - Retry the AI call on temporary errors
 - Support other EDI acknowledgments and error logs
