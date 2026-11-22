@@ -7,6 +7,7 @@ from collections import deque
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
+from ai_explainer import explain_with_ai
 from edi_parser import parse_997
 from masking import mask_edi
 
@@ -47,6 +48,7 @@ def rate_limit(x_api_key: str = Header(default=None)):
 class ExplainRequest(BaseModel):
     type: str
     payload: str
+    use_ai: bool = False
 
 
 def build_summary(parsed):
@@ -82,7 +84,7 @@ def explain(
         raise HTTPException(status_code=400, detail="Only type 997 is supported for now")
 
     # Mask sender and receiver IDs first. Everything after this line,
-    # including any future AI step, only sees the masked copy.
+    # including the AI step, only sees the masked copy.
     masked = mask_edi(req.payload)
 
     parsed = parse_997(masked)
@@ -90,8 +92,18 @@ def explain(
     if not parsed["transaction_sets"]:
         raise HTTPException(status_code=400, detail="No AK2 transaction set found in the payload")
 
-    return {
+    result = {
         "summary": build_summary(parsed),
         "masked_payload": masked,
         "details": parsed,
     }
+
+    # Optional AI step: only the parsed result is sent, never the raw EDI.
+    # If it fails, the normal summary above is still returned.
+    if req.use_ai:
+        text, error = explain_with_ai(parsed)
+        result["ai_explanation"] = text
+        if error:
+            result["ai_error"] = error
+
+    return result

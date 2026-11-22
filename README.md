@@ -1,12 +1,15 @@
 # EDI Error Explainer
 
-A small personal project that turns EDI 997 acknowledgment errors into plain-English explanations through a REST API.
+A small personal project that turns EDI 997 acknowledgment errors into plain-English explanations through a REST API. It combines a rule-based parser with an optional LLM step.
 
 **All data in this repo is invented demo data. No real partner or company data is used.**
 
 ## What it does
 
-Send a 997 message to the API. It returns a readable summary of what was accepted or rejected, which segments were wrong, and why.
+Send a 997 message to the API. It returns:
+
+- a table-based summary of what was accepted or rejected, which segments were wrong, and why (always)
+- an optional AI explanation with practical things to check (when `use_ai` is true)
 
 Example request:
 
@@ -14,7 +17,11 @@ Example request:
 POST /explain
 x-api-key: demo-key-12345
 
-{ "type": "997", "payload": "ST*997*0001~AK1*PO*123~AK2*850*0001~AK3*PO1*5**8~AK4*2*235*7~AK5*R*5~AK9*R*1*1*0~SE*8*0001~" }
+{
+  "type": "997",
+  "use_ai": true,
+  "payload": "ST*997*0001~AK1*PO*123~AK2*850*0001~AK3*PO1*5**8~AK4*2*235*7~AK5*R*5~AK9*R*1*1*0~SE*8*0001~"
+}
 ```
 
 Example summary in the response:
@@ -24,14 +31,22 @@ Example summary in the response:
 ## Architecture
 
 ```
-Client (Postman or simulator) -> Python app (FastAPI) -> JSON explanation
+Client (Postman or simulator) -> Python app (FastAPI) -> JSON response
                                   |- API key check (401)
                                   |- Rate limit (429)
                                   |- Masking of ISA/GS sender and receiver IDs
-                                  |- 997 parser + error-code tables
+                                  |- 997 parser + error-code tables (source of truth)
+                                  |- Optional LLM step (Gemini API)
 ```
 
-The gateway features (key check, rate limit, masking) are written in code to practice the ideas behind API gateway policies such as Apigee's VerifyAPIKey, Quota/SpikeArrest and data masking. A real Apigee proxy and an optional LLM step are planned as later phases.
+How the AI step is kept safe:
+
+- Only the parsed result is sent to the LLM, never the raw EDI.
+- IDs are masked before parsing.
+- The prompt tells the model to use only the facts it is given.
+- If the AI call fails (for example HTTP 503), the response still contains the table-based summary, plus an `ai_error` note.
+
+The gateway features (key check, rate limit, masking) are written in code to practice the ideas behind API gateway policies such as Apigee's VerifyAPIKey, Quota/SpikeArrest and data masking. A real Apigee proxy is a planned next phase.
 
 ## Run it (Windows)
 
@@ -40,8 +55,11 @@ python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
 set EDI_API_KEY=demo-key-12345
+set GEMINI_API_KEY=your-own-key
 uvicorn main:app
 ```
+
+`GEMINI_API_KEY` is only needed for `use_ai: true`. Optionally set `GEMINI_MODEL` to choose a different model. Keys are read from environment variables and never stored in the repo.
 
 In a second window, run the Sterling-style simulator:
 
@@ -54,6 +72,7 @@ python sterling_simulator.py
 - `main.py`: API, key check, rate limit
 - `edi_parser.py`: 997 parser and error-code tables
 - `masking.py`: masks sender and receiver IDs
+- `ai_explainer.py`: optional LLM step with fallback
 - `sterling_simulator.py`: script that mimics a Sterling Integrator HTTP call
 - `samples/`: demo 997 files
 
@@ -61,11 +80,12 @@ python sterling_simulator.py
 
 - Only 997 messages are supported.
 - The error-code tables should be checked against the X12 standard or a partner spec before real use.
+- AI explanations can be wrong or vary between calls, so the parser output is the source of truth. An early version of the prompt made the model claim a value was "empty" when the 997 had not reported it, which is why the prompt now forbids that.
 - The rate limit is kept in memory and works for a single server process only.
 - Only ID fields are masked, not names or addresses.
 
 ## Possible next steps
 
 - Put an Apigee proxy in front of the app
-- Add an optional LLM step for friendlier explanations (using the masked data only)
+- Retry the AI call on temporary errors
 - Support other EDI acknowledgments and error logs
